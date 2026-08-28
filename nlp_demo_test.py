@@ -438,7 +438,102 @@ validation) của mỗi seed được giữ lại.
 > khoảng 30-40 phút/seed trên GPU. Muốn xem kết quả ngay, chuyển thẳng
 > xuống **Mục 7 — Demo suy luận**.
 
-## 8. Demo: Suy luận Ensemble Soft-Voting trên dữ liệu thật
+"""
+
+def evaluate(model, val_dataloader, device):
+    model.eval()
+    hate_preds, hate_targets, noise_preds, noise_targets = [], [], [], []
+    with torch.no_grad():
+        for batch in val_dataloader:
+            input_ids, attn_mask = batch['input_ids'].to(device), batch['attention_mask'].to(device)
+            h_tgt, n_tgt = batch['hate_label'].to(device), batch['noise_label'].to(device)
+
+            h_logits, n_logits = model(input_ids, attn_mask)
+            hate_preds.extend(torch.argmax(h_logits, dim=1).cpu().numpy())
+            hate_targets.extend(h_tgt.cpu().numpy())
+            noise_preds.extend(torch.argmax(n_logits, dim=1).cpu().numpy())
+            noise_targets.extend(n_tgt.cpu().numpy())
+
+    h_f1 = f1_score(hate_targets, hate_preds, average='macro')
+    n_f1 = f1_score(noise_targets, noise_preds, average='macro')
+    return h_f1, n_f1, 0.85 * h_f1 + 0.15 * n_f1
+
+
+def train_one_model(seed, train_dataloader, val_dataloader, epochs=10, accumulation_steps=2,
+                     save_dir="models"):
+    print(f"\n=== Huấn luyện model với SEED={seed} ===")
+    seed_everything(seed)
+
+    model = ComplexNoiseAwareFPTUModel(model_name="xlm-roberta-base").to(device)
+    loss_fn = AdvancedLossWrapper(num_tasks=2, device=device).to(device)
+
+    total_steps = (len(train_dataloader) // accumulation_steps) * epochs
+    optimizer = AdamW(list(model.parameters()) + list(loss_fn.parameters()), lr=4e-5, weight_decay=0.01)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps)
+    scaler = torch.amp.GradScaler(device.type)
+
+    best_f1 = 0.0
+    os.makedirs(save_dir, exist_ok=True)
+    model_save_path = os.path.join(save_dir, f'best_model_seed{seed}.pth')
+
+    for epoch in range(epochs):
+        model.train()
+        total_train_loss = 0
+        optimizer.zero_grad()
+
+        for step, batch in enumerate(train_dataloader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            hate_targets = batch['hate_label'].to(device)
+            noise_targets = batch['noise_label'].to(device)
+
+            with torch.autocast(device_type=device.type):
+                hate_logits, noise_logits = model(input_ids, attention_mask)
+                loss = loss_fn(hate_logits, noise_logits, hate_targets, noise_targets)
+                loss = loss / accumulation_steps
+
+            scaler.scale(loss).backward()
+
+            if (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dataloader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
+
+            total_train_loss += loss.item() * accumulation_steps
+
+        h_f1, n_f1, combined_f1 = evaluate(model, val_dataloader, device)
+        avg_loss = total_train_loss / len(train_dataloader)
+        print(f"[seed {seed}] Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | Hate F1: {h_f1:.4f} | Noise F1: {n_f1:.4f} | Score: {combined_f1:.4f}")
+
+        if combined_f1 > best_f1:
+            print(f" -> Điểm tăng! Đang lưu mô hình (seed {seed})...")
+            best_f1 = combined_f1
+            torch.save(model.state_dict(), model_save_path)
+
+    return model_save_path, best_f1
+
+# ĐỂ CHẠY THẬT (cần training_set.csv / validation_set.csv):
+#
+# tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+# augmenter = TextAugmenter(aug_prob=0.15)
+# train_dataset = RViHSDDataset(train_df['text'].values, train_h_labels, train_n_labels,
+#                                tokenizer, 128, augmenter, is_train=True)
+# val_dataset   = RViHSDDataset(val_df['text'].values, val_h_labels, val_n_labels,
+#                                tokenizer, 128, augmenter, is_train=False)
+# train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+# val_dataloader   = DataLoader(val_dataset, batch_size=32, shuffle=False)
+#
+# SEEDS = [2026, 2027, 2028]
+# ensemble_paths = []
+# for seed in SEEDS:
+#     path, f1 = train_one_model(seed, train_dataloader, val_dataloader, epochs=10)
+#     ensemble_paths.append(path)
+print("[*] Logic huấn luyện đã sẵn sàng (không tự động chạy trong notebook demo này).")
+
+"""## 8. Demo: Suy luận Ensemble Soft-Voting trên dữ liệu thật
 
 Đây là phần **chạy được ngay**, dùng 3 checkpoint đã huấn luyện sẵn để dự
 đoán trên `data/sample_public_test.csv` — 10 dòng thật trích từ tập
@@ -452,6 +547,7 @@ của từng model, không chỉ nhãn cuối cùng.
 
 > Cần tải 3 file `best_model_seed{2026,2027,2028}.pth` vào thư mục trên drive của bạn và gán đường dẫn vào `DRIVE_DIR`
 > trước khi chạy (xem `README.md`).
+
 """
 
 MODELS_DIR = MODEL_PATHS
