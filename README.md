@@ -1,4 +1,5 @@
 # Vietnamese Noise-Aware Hate Speech Detection
+[![Open In Colab](https://colab.research.google.com/drive/1oxHe8X5zSrvLrWSBgyzS-7Y6L1cVw7WN?usp=sharing)]
 
 Mô hình multi-task học đồng thời 2 nhiệm vụ trên văn bản tiếng Việt có khả năng bị
 làm nhiễu (teencode, mất dấu, lặp ký tự, che ký tự...):
